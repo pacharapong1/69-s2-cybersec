@@ -5,7 +5,7 @@ services:
     ports:
      - 54321:5432
     environmment:
-      - POSTGRES_PASSWORD=123456 
-      - POSTGRES_USER=BeerDB 
+      - POSTGRES_PASSWORD=123456
+      - POSTGRES_USER=BeerDB
       - POSTGRES_DB=69-s2-db
-    
+
