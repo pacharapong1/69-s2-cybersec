@@ -1,1 +1,11 @@
 services:
+  db:
+    image: postgres:16-alpin.
+    container_name: 69-s2-db
+    ports:
+     - 54321:5432
+    environmments:
+      - POSTGRES_PASSWORD=123456 
+      - POSTGRES_USER=BeerDB 
+      - POSTGRES_DB=69-s2-db
+    
