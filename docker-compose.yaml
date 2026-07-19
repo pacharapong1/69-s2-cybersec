@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:16-alpine.
+    image: postgres:16-alpine
     container_name: 69-s2-db
     ports:
      - 54321:5432
@@ -9,3 +9,13 @@ services:
       - POSTGRES_USER=BeerDB
       - POSTGRES_DB=69-s2-db
 
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: pg_admin
+    ports:
+      - 8082:80
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=Beer@admin.com
+      - PGADMIN_DEFAULT_PASSWORD=123456
+    depends_on:
+      - db
