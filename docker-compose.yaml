@@ -1,10 +1,6 @@
 services:
   db:
-<<<<<<< HEAD
     image: postgres:16-alpine
-=======
-    image: postgres:16-alpine.
->>>>>>> fda68817278ad60e6d57b2a57b6f804dfbf0b3f9
     container_name: 69-s2-db
     ports:
      - 54321:5432
