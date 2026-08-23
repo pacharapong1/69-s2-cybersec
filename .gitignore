@@ -1,1 +1,4 @@
 .env
+data-postgres/
+data-pgadmin/
+api.http
