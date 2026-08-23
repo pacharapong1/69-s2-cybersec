@@ -1,0 +1,34 @@
+# REST
+
+## Login
+POST http://localhost:9092/admin/login
+Content-Type: application/json
+
+{
+    "email": "",
+    "password": "",
+    "rememberMe": false
+}
+
+## Register
+POST http://localhost:9092/admin/register
+Content-Type: application/json
+
+{
+    "username": "",
+    "email": "",
+    "password": "",
+    "confirmPassword": ""
+}
+
+## Forgot Password
+POST http://localhost:9092/admin/forgot-password
+Content-Type: application/json
+
+{
+    "email": ""
+}
+
+## Profile
+GET http://localhost:9092/admin/profile
+Authorization: Bearer YOUR_ACCESS_TOKEN
