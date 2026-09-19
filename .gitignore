@@ -1,4 +1,27 @@
+# ===== Secrets / local config =====
 .env
+.env.local
+.env.production
+.env.development
+
+# ===== Database data (bind mounts) =====
 data-postgres/
 data-pgadmin/
+
+# ===== REST Client working copy (real private flow) =====
 api.http
+
+# ===== IDE / editor =====
+.vscode/
+.idea/
+*.code-workspace
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== Logs / temp =====
+*.log
+*.tmp
+*~

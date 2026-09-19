@@ -1,17 +1,29 @@
-# REST
+# REST Client Script — Forgot / Reset Password (Strapi)
+# ======================================================
+# 1) ดาวน์โหลด extension "REST Client" ใน VS Code ก่อน
+# 2) สร้างไฟล์ .env จาก env.simple แล้วใส่ค่า email/password จริงของคุณ
+# 3) เปิดไฟล์นี้ กด "Send Request" ตามลำดับข้อ
+#
+# หมายเหตุการแก้ตามมาตรฐาน IAAA:
+# - reset code หมดอายุภายใน 15 นาที (TTL) - ถ้าเกินเวลาจะถูกปฏิเสธ
+# - ทุก request ถูกจำกัดจำนวนครั้ง (rate limit)
+# - มี audit log ทุกการ forgot/reset password
+# - ข้อ 1.3 / 2.3 จะคืน "code" กลับใน response และข้อ 1.3.1 / 2.3.1
+#   ดึง code นั้นไปใช้เองอัตโนมัติ (don't need to copy-paste)
 
 ## Variables
+@baseUrl = http://localhost:{{$dotenv APP_PORT}}
 @admin_email = {{$dotenv ADMIN_EMAIL}}
 @admin_password = {{$dotenv ADMIN_PASSWORD}}
+@admin_new_password = {{$dotenv ADMIN_NEW_PASSWORD}}
 @user_email = {{$dotenv USER_EMAIL}}
 @user_password = {{$dotenv USER_PASSWORD}}
-@reset_code = {{$dotenv RESET_CODE}}
-@new_password = {{$dotenv NEW_PASSWORD}}
+@user_new_password = {{$dotenv USER_NEW_PASSWORD}}
 
-## 1.Admin
+## 1. Admin
 
-### 1.1 Login
-POST http://localhost:9092/admin/login
+### 1.1 Login (เอา token จาก response ไปใส่ใน 1.4)
+POST {{baseUrl}}/admin/login
 Content-Type: application/json
 
 {
@@ -20,43 +32,43 @@ Content-Type: application/json
     "rememberMe": false
 }
 
-### 1.2 Register (admin) one time for first time to create admin account
-POST http://localhost:9092/admin/register-admin
+### 1.2 Register (admin) - ใช้ครั้งแรกตอนยังไม่มี admin เท่านั้น
+POST {{baseUrl}}/admin/register-admin
 Content-Type: application/json
 
 {
-    "firstname": "",
-    "lastname": "",
+    "firstname": "{{$dotenv ADMIN_FIRSTNAME}}",
+    "lastname": "{{$dotenv ADMIN_LASTNAME}}",
     "email": "{{admin_email}}",
     "password": "{{admin_password}}"
 }
 
-### 1.3 Forgot Password
-POST http://localhost:9092/admin/forgot-password
+### 1.3 Forgot Password (ระบบคืน "code" ใน response)
+# @name adminForgotPassword
+POST {{baseUrl}}/admin/forgot-password
 Content-Type: application/json
 
 {
     "email": "{{admin_email}}"
 }
 
-### 1.3.1 Reset Password (ใส่ code จากอีเมลใน @reset_code แล้วตั้งรหัสใหม่)
-POST http://localhost:9092/admin/reset-password
+### 1.3.1 Reset Password (code ดึงให้อัตโนมัติจากข้อ 1.3)
+POST {{baseUrl}}/admin/reset-password
 Content-Type: application/json
 
 {
-    "code": "{{reset_code}}",
-    "password": "{{new_password}}",
-    "passwordConfirmation": "{{new_password}}"
+    "resetPasswordToken": "{{adminForgotPassword.response.body.$.code}}",
+    "password": "{{admin_new_password}}"
 }
 
-### 1.4 Profile
-GET http://localhost:9092/admin/users/me
+### 1.4 Profile (ใส่ Bearer <admin-jwt-token> จากข้อ 1.1)
+GET {{baseUrl}}/admin/users/me
 Authorization: Bearer <admin-jwt-token>
 
-## 2.User
+## 2. User
 
-### 2.1 Login
-POST http://localhost:9092/api/auth/local
+### 2.1 Login (เอา token จาก response ไปใส่ใน 2.4)
+POST {{baseUrl}}/api/auth/local
 Content-Type: application/json
 
 {
@@ -65,33 +77,34 @@ Content-Type: application/json
 }
 
 ### 2.2 Register
-POST http://localhost:9092/api/auth/local/register
+POST {{baseUrl}}/api/auth/local/register
 Content-Type: application/json
 
 {
-    "username": "",
+    "username": "{{$dotenv USER_USERNAME}}",
     "email": "{{user_email}}",
     "password": "{{user_password}}"
 }
 
-### 2.3 Forgot Password
-POST http://localhost:9092/api/auth/forgot-password
+### 2.3 Forgot Password (ระบบคืน "code" ใน response)
+# @name userForgotPassword
+POST {{baseUrl}}/api/auth/forgot-password
 Content-Type: application/json
 
 {
     "email": "{{user_email}}"
 }
 
-### 2.3.1 Reset Password (ใส่ code จากอีเมลใน @reset_code แล้วตั้งรหัสใหม่)
-POST http://localhost:9092/api/auth/reset-password
+### 2.3.1 Reset Password (code ดึงให้อัตโนมัติจากข้อ 2.3)
+POST {{baseUrl}}/api/auth/reset-password
 Content-Type: application/json
 
 {
-    "code": "{{reset_code}}",
-    "password": "{{new_password}}",
-    "passwordConfirmation": "{{new_password}}"
+    "code": "{{userForgotPassword.response.body.$.code}}",
+    "password": "{{user_new_password}}",
+    "passwordConfirmation": "{{user_new_password}}"
 }
 
-### 2.4 Profile
-GET http://localhost:9092/api/users/me
+### 2.4 Profile (ใส่ Bearer <user-jwt-token> จากข้อ 2.1)
+GET {{baseUrl}}/api/users/me
 Authorization: Bearer <user-jwt-token>

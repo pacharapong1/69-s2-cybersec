@@ -25,7 +25,10 @@ services:
       - db
 
   app:
-    image: prawee/strapi
+    build:
+      context: ./strapi
+      dockerfile: Dockerfile
+    image: 69-s2-strapi:latest
     container_name: 69-s2-app
     ports:
       - ${APP_PORT}:1337
@@ -35,7 +38,12 @@ services:
       DATABASE_PORT: 5432
       DATABASE_NAME: ${POSTGRES_DB}
       DATABASE_USERNAME: ${POSTGRES_USER}
-      DATABASE_PASSWORD: ${POSTGRES_PASSWORD}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD}
+      APP_KEYS: ${APP_KEYS}
+      JWT_SECRET: ${JWT_SECRET}
+      ADMIN_JWT_SECRET: ${ADMIN_JWT_SECRET}
+      API_TOKEN_SALT: ${API_TOKEN_SALT}
+      TRANSFER_TOKEN_SALT: ${TRANSFER_TOKEN_SALT}
     depends_on:
       - db
 
