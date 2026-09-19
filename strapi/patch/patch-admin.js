@@ -128,4 +128,30 @@ patch('controllers/authentication.js', [
   },
 ]);
 
-console.log('[patch] admin forgot/reset now enforces TTL + audit and returns the reset token.');
+// 4) routes/authentication.js - apply admin::rateLimit to forgot/reset password
+patch('routes/authentication.js', [
+  {
+    from: `    path: '/forgot-password',
+    handler: 'authentication.forgotPassword',
+    config: { auth: false },`,
+    to: `    path: '/forgot-password',
+    handler: 'authentication.forgotPassword',
+    config: {
+      auth: false,
+      middlewares: ['admin::rateLimit'],
+    },`,
+  },
+  {
+    from: `    path: '/reset-password',
+    handler: 'authentication.resetPassword',
+    config: { auth: false },`,
+    to: `    path: '/reset-password',
+    handler: 'authentication.resetPassword',
+    config: {
+      auth: false,
+      middlewares: ['admin::rateLimit'],
+    },`,
+  },
+]);
+
+console.log('[patch] admin forgot/reset now enforces TTL + audit + rate limit and returns the reset token.');
