@@ -44,7 +44,7 @@ if [ -z "$EMAIL" ]; then
 fi
 
 echo "==> เรียก ${URL}"
-RESP="$(curl -s -X POST "${URL}" -H "Content-Type: application/json" -d "{\"email\":\"${EMAIL}\"}")"
+RESP="$(curl -s -X POST "${URL}" -H "Content-Type: application/json" -H "X-Reset-Dev-Key: ${RESET_DEV_KEY}" -d "{\"email\":\"${EMAIL}\"}")"
 echo "resp: ${RESP}"
 
 CODE="$(printf '%s' "${RESP}" | sed -n 's/.*"code":"\([^"]*\)".*/\1/p')"

@@ -57,6 +57,12 @@ if [ -z "$CODE" ]; then
   fi
 fi
 
+# ระบบปัจจุบันต้องการ code รูปแบบ "<expires_ms>:<random>" (TTL 15 นาที)
+# และเก็บใน DB เป็น SHA-256 hash เท่านั้น (ไม่เก็บตัวเต็ม)
+EXPIRES_MS="$(( ($(date +%s) + 900) * 1000 ))"
+FULL_CODE="${EXPIRES_MS}:${CODE}"
+HASH="$(printf '%s' "$FULL_CODE" | sha256sum | cut -d' ' -f1)"
+
 # Escape single quotes สำหรับ SQL string literal
 sql_escape() {
   printf '%s' "$1" | sed "s/'/''/g"
@@ -64,23 +70,23 @@ sql_escape() {
 
 TABLE_S="$(sql_escape "$TABLE")"
 EMAIL_S="$(sql_escape "$EMAIL")"
-CODE_S="$(sql_escape "$CODE")"
+HASH_S="$(sql_escape "$HASH")"
 
 CONTAINER="69-s2-db"
 DBPORT="5432"
 
-echo "==> ตั้ง reset token ให้ $TABLE (email = $EMAIL)"
+echo "==> ตั้ง reset token ให้ $TABLE (email = $EMAIL, หมดอายุใน 15 นาที)"
 docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "$CONTAINER" psql \
   -h localhost -p "$DBPORT" -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" \
-  -c "UPDATE ${TABLE_S} SET reset_password_token = '${CODE_S}' WHERE email = '${EMAIL_S}';"
+  -c "UPDATE ${TABLE_S} SET reset_password_token = '${HASH_S}' WHERE email = '${EMAIL_S}';"
 
 echo
-echo "==> ตรวจสอบผล (reset_password_token ควรเป็น ${CODE})"
+echo "==> ตรวจสอบผล (reset_password_token ควรเป็น hash 64 ตัว ไม่ใช่ code ตัวเต็ม)"
 docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "$CONTAINER" psql \
   -h localhost -p "$DBPORT" -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" \
-  -c "SELECT id, email, reset_password_token FROM ${TABLE_S} WHERE email = '${EMAIL_S}';"
+  -c "SELECT id, email, reset_password_token, length(reset_password_token) AS len FROM ${TABLE_S} WHERE email = '${EMAIL_S}';"
 
 echo
 echo "เรียบร้อย! นำ code นี้ไปใส่ใน .env แล้วเรียกข้อ 1.3.1 / 2.3.1"
-echo "   ADMIN_RESET_CODE=${CODE}"
-echo "   USER_RESET_CODE=${CODE}"
+echo "   ADMIN_RESET_CODE=${FULL_CODE}"
+echo "   USER_RESET_CODE=${FULL_CODE}"
