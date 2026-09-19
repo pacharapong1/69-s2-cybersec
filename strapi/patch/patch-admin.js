@@ -25,15 +25,11 @@ function patch(file, pairs) {
   console.log(`[patch] ok: ${file}`);
 }
 
-// 1) services/auth.js - forgotPassword: add TTL + audit, keep returning the token (course flow)
+// 1) services/auth.js - forgotPassword: TTL + store hash only + audit, still return the code (course flow)
 patch('services/auth.js', [
   {
-    from: `  const resetPasswordToken = getService('token').createToken();`,
-    to: `  const resetPasswordToken = getService('token').createToken();
-  const expiresAt = Date.now() + 15 * 60 * 1000;`,
-  },
-  {
-    from: `  await getService('user').updateById(user.id, { resetPasswordToken });
+    from: `  const resetPasswordToken = getService('token').createToken();
+  await getService('user').updateById(user.id, { resetPasswordToken });
 
   // Send an email to the admin.
   const url = \`\${getAbsoluteAdminUrl(
@@ -59,18 +55,24 @@ patch('services/auth.js', [
       strapi.log.error(err);
     });
 };`,
-    to: `  await getService('user').updateById(user.id, {
-    resetPasswordToken: \`\${expiresAt}:\${resetPasswordToken}\`,
+    to: `  const resetPasswordToken = getService('token').createToken();
+  const expiresAt = Date.now() + 15 * 60 * 1000;
+  const crypto = require('crypto');
+  const code = \`\${expiresAt}:\${resetPasswordToken}\`;
+
+  // (custom) store only the hash of the code, never the plaintext value
+  await getService('user').updateById(user.id, {
+    resetPasswordToken: crypto.createHash('sha256').update(code).digest('hex'),
   });
 
   // (custom) TTL + audit: return the reset token to the client (course test flow), no email
   console.log(\`[audit][admin/forgot] email=\${email} at=\${new Date().toISOString()} ok\`);
-  return \`\${expiresAt}:\${resetPasswordToken}\`;
+  return code;
 };`,
   },
 ]);
 
-// 2) services/auth.js - resetPassword: validate TTL + audit then reset
+// 2) services/auth.js - resetPassword: validate TTL + lookup by hash + audit then reset
 patch('services/auth.js', [
   {
     from: `const resetPassword = async ({ resetPasswordToken, password } = {}) => {
@@ -96,9 +98,12 @@ patch('services/auth.js', [
     throw new ApplicationError();
   }
 
+  // (custom) lookup by the hash stored in the database
+  const crypto = require('crypto');
+  const hashedToken = crypto.createHash('sha256').update(resetPasswordToken).digest('hex');
   const matchingUser = await strapi
     .query('admin::user')
-    .findOne({ where: { resetPasswordToken, isActive: true } });
+    .findOne({ where: { resetPasswordToken: hashedToken, isActive: true } });
 
   if (!matchingUser) {
     console.log('[audit][admin/reset] no user for token at=' + new Date().toISOString());
@@ -116,13 +121,17 @@ patch('services/auth.js', [
   },
 ]);
 
-// 3) controllers/authentication.js - forgotPassword: return the token in the response
+// 3) controllers/authentication.js - forgotPassword: dev-key gate + return the token in the response
 patch('controllers/authentication.js', [
   {
     from: `    getService('auth').forgotPassword(input);
 
     ctx.status = 204;`,
-    to: `    const code = await getService('auth').forgotPassword(input);
+    to: `    // (custom) dev-key gate: only callers that know the development key get a reset token
+    const code =
+      ctx.request.headers['x-reset-dev-key'] === (process.env.RESET_DEV_KEY || '')
+        ? await getService('auth').forgotPassword(input)
+        : undefined;
 
     ctx.body = { ok: true, code };`,
   },
@@ -154,4 +163,4 @@ patch('routes/authentication.js', [
   },
 ]);
 
-console.log('[patch] admin forgot/reset now enforces TTL + audit + rate limit and returns the reset token.');
+console.log('[patch] admin forgot/reset now enforces dev-key gate + TTL + audit + rate limit, stores only hash.');
