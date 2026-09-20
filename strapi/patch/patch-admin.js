@@ -208,6 +208,99 @@ patch('controllers/authenticated-user.js', [
       console.log('[audit][admin/change-own-password] email=' + ctx.state.user.email + ' at=' + new Date().toISOString() + ' ok');
     }`,
   },
+  {
+    from: `    const { currentPassword, ...userInfo } = input;`,
+    to: `    const { currentPassword, ...userInfo } = input;
+
+    if (userInfo.password && currentPassword === userInfo.password) {
+      return ctx.badRequest('ValidationError', {
+        password: ['Your new password must be different than your current password'],
+      });
+    }`,
+  },
 ]);
 
-console.log('[patch] admin forgot/reset now enforce JWT gate + TTL + audit + rate limit, stores only hash.; login & change-own-password audited.');
+// 7) services/auth.js - account lockout on repeated failed logins
+patch('services/auth.js', [
+  {
+    from: `const checkCredentials = async ({ email, password }) => {
+  const user = await strapi.query('admin::user').findOne({ where: { email } });
+
+  if (!user || !user.password) {
+    return [null, false, { message: 'Invalid credentials' }];
+  }
+
+  const isValid = await validatePassword(password, user.password);
+
+  if (!isValid) {
+    return [null, false, { message: 'Invalid credentials' }];
+  }
+
+  if (!(user.isActive === true)) {
+    return [null, false, { message: 'User not active' }];
+  }
+
+  return [null, user];
+};`,
+    to: `const loginFailures = new Map();
+const LOGIN_MAX_FAILS = 5;
+const LOGIN_LOCKOUT_MS = 15 * 60 * 1000;
+
+const checkCredentials = async ({ email, password }) => {
+  const lockKey = String(email || '').toLowerCase();
+
+  const rec = loginFailures.get(lockKey);
+  if (rec && rec.until > Date.now()) {
+    console.log('[audit][admin/login] locked email=' + email + ' at=' + new Date().toISOString());
+    return [null, false, { message: 'Too many login attempts. Please try again later.' }];
+  }
+  if (rec && rec.until <= Date.now()) {
+    loginFailures.delete(lockKey);
+  }
+
+  const user = await strapi.query('admin::user').findOne({ where: { email } });
+
+  if (!user || !user.password) {
+    return [null, false, { message: 'Invalid credentials' }];
+  }
+
+  const isValid = await validatePassword(password, user.password);
+
+  if (!isValid) {
+    const count = (rec ? rec.count : 0) + 1;
+    if (count >= LOGIN_MAX_FAILS) {
+      loginFailures.set(lockKey, { count: 0, until: Date.now() + LOGIN_LOCKOUT_MS });
+      console.log('[audit][admin/login] lockout email=' + email + ' at=' + new Date().toISOString());
+    } else {
+      loginFailures.set(lockKey, { count, until: 0 });
+    }
+    return [null, false, { message: 'Invalid credentials' }];
+  }
+
+  if (!(user.isActive === true)) {
+    return [null, false, { message: 'User not active' }];
+  }
+
+  loginFailures.delete(lockKey);
+
+  return [null, user];
+};`,
+  },
+]);
+
+// 8) routes/authentication.js - rate limit admin /renew-token
+patch('routes/authentication.js', [
+  {
+    from: `    path: '/renew-token',
+    handler: 'authentication.renewToken',
+    config: { auth: false },`,
+    to: `    path: '/renew-token',
+    handler: 'authentication.renewToken',
+    config: {
+      auth: false,
+      middlewares: ['admin::rateLimit'],
+    },`,
+  },
+]);
+
+console.log('[patch] admin lockout + renew-token rate limit + same-password check added.');

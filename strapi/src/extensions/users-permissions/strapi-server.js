@@ -25,6 +25,50 @@ function isStrongPassword(password) {
   );
 }
 
+// Account lockout: after MAX_LOGIN_FAILS consecutive failed logins for the same
+// identifier the account is locked for LOCKOUT_MS. Persisted in the plugin store
+// (DB) so the state is shared regardless of how the module is loaded.
+const LOGIN_MAX_FAILS = 5;
+const LOGIN_LOCKOUT_MS = 15 * 60 * 1000;
+const LOCKOUT_STORE_KEY = 'login_lockouts_store';
+
+async function getLoginFailures() {
+  const store = strapi.store({ type: 'plugin', name: 'users-permissions' });
+  const all = (await store.get({ key: LOCKOUT_STORE_KEY })) || {};
+  return { store, all };
+}
+
+async function isAccountLocked(identifier) {
+  const { all } = await getLoginFailures();
+  const rec = all[identifier];
+  if (!rec) return false;
+  if (rec.until > Date.now()) return true;
+  if (rec.until <= Date.now()) delete all[identifier];
+  return false;
+}
+
+async function recordLoginFailure(identifier) {
+  const { store, all } = await getLoginFailures();
+  const rec = all[identifier] || { count: 0, until: 0 };
+  rec.count += 1;
+  if (rec.count >= LOGIN_MAX_FAILS) {
+    rec.until = Date.now() + LOGIN_LOCKOUT_MS;
+    rec.count = 0;
+    all[identifier] = rec;
+    await store.set({ key: LOCKOUT_STORE_KEY, value: all });
+    return rec.until;
+  }
+  all[identifier] = rec;
+  await store.set({ key: LOCKOUT_STORE_KEY, value: all });
+  return 0;
+}
+
+async function clearLoginFailures(identifier) {
+  const { store, all } = await getLoginFailures();
+  delete all[identifier];
+  await store.set({ key: LOCKOUT_STORE_KEY, value: all });
+}
+
 async function authenticate(ctx) {
   try {
     const token = await strapi.plugin('users-permissions').service('jwt').getToken(ctx);
@@ -48,6 +92,7 @@ module.exports = (plugin) => {
   const originalChangePassword = plugin.controllers.auth.changePassword;
   const originalCallback = plugin.controllers.auth.callback;
   const originalRegister = plugin.controllers.auth.register;
+  const originalSendEmailConfirmation = plugin.controllers.auth.sendEmailConfirmation;
 
   // Strapi auto-injects `config.auth = { scope }` on content-api routes, and the
   // injected scope (plugin::users-permissions.auth.*) is not granted to the
@@ -57,19 +102,63 @@ module.exports = (plugin) => {
     if (route.handler === 'auth.forgotPassword' || route.handler === 'auth.resetPassword') {
       route.config = { ...route.config, auth: false };
     }
+    // anti-enumeration endpoint: also protect with the plugin rate limiter
+    if (route.handler === 'auth.sendEmailConfirmation') {
+      route.config = {
+        ...route.config,
+        middlewares: ['plugin::users-permissions.rateLimit'],
+      };
+    }
   }
 
   plugin.controllers.auth.callback = async (ctx) => {
-    const identifier =
-      (ctx.request.body && ctx.request.body.identifier) || ctx.params.provider || 'unknown';
+    const provider = (ctx.params && ctx.params.provider) || 'local';
+    const identifier = String(
+      (ctx.request.body && ctx.request.body.identifier) || ''
+    ).toLowerCase();
+
+    if (provider === 'local') {
+      if (await isAccountLocked(identifier)) {
+        audit('user/login', ctx, { identifier, result: 'locked' });
+        return ctx.throw(423, 'Too many login attempts. Please try again later.');
+      }
+    }
+
     try {
       const result = await originalCallback(ctx);
+      if (provider === 'local') {
+        await clearLoginFailures(identifier);
+      }
       audit('user/login', ctx, { identifier, result: 'ok' });
       return result;
     } catch (err) {
-      audit('user/login', ctx, { identifier, result: 'failed' });
+      if (provider === 'local') {
+        const lockedUntil = await recordLoginFailure(identifier);
+        if (lockedUntil) {
+          audit('user/login', ctx, { identifier, result: 'lockout' });
+        }
+        audit('user/login', ctx, { identifier, result: 'failed' });
+      } else {
+        audit('user/login', ctx, { identifier, result: 'failed' });
+      }
       throw err;
     }
+  };
+
+  plugin.controllers.auth.sendEmailConfirmation = async (ctx) => {
+    const { email } = ctx.request.body || {};
+    try {
+      await originalSendEmailConfirmation(ctx);
+    } catch (err) {
+      // uniform response regardless of account state (no enumeration of
+      // confirmed/blocked status); input validation errors still surface
+      if (err.name === 'ValidationError') {
+        throw err;
+      }
+      audit('user/send-email-confirmation', ctx, { email, result: 'uniform-response' });
+      return ctx.send({ email: (email || '').toLowerCase(), sent: true });
+    }
+    return undefined;
   };
 
   plugin.controllers.auth.register = async (ctx) => {
