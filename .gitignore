@@ -11,6 +11,10 @@ data-pgadmin/
 # ===== REST Client working copy (real private flow) =====
 api.http
 
+# ===== Reset-token helper scripts (real private flow) =====
+forgot-token.sh
+reset-token.sh
+
 # ===== IDE / editor =====
 .vscode/
 .idea/

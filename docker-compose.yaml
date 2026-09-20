@@ -44,7 +44,6 @@ services:
       ADMIN_JWT_SECRET: ${ADMIN_JWT_SECRET}
       API_TOKEN_SALT: ${API_TOKEN_SALT}
       TRANSFER_TOKEN_SALT: ${TRANSFER_TOKEN_SALT}
-      RESET_DEV_KEY: ${RESET_DEV_KEY}
     depends_on:
       - db
 

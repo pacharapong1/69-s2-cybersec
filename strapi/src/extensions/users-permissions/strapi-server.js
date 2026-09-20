@@ -13,32 +13,52 @@ function sha256(input) {
   return crypto.createHash('sha256').update(String(input)).digest('hex');
 }
 
-function hasDevKey(ctx) {
-  return ctx.request.headers['x-reset-dev-key'] === (process.env.RESET_DEV_KEY || '');
+async function authenticate(ctx) {
+  try {
+    const token = await strapi.plugin('users-permissions').service('jwt').getToken(ctx);
+    if (!token || token.id === undefined) {
+      return null;
+    }
+    const user = await strapi
+      .query('plugin::users-permissions.user')
+      .findOne({ where: { id: token.id } });
+    if (!user || user.blocked) {
+      return null;
+    }
+    return user;
+  } catch (err) {
+    return null;
+  }
 }
 
 module.exports = (plugin) => {
   const originalResetPassword = plugin.controllers.auth.resetPassword;
 
+  // Strapi auto-injects `config.auth = { scope }` on content-api routes, and the
+  // injected scope (plugin::users-permissions.auth.*) is not granted to the
+  // "Authenticated" role -> would 403. We set auth:false and do the JWT + owner
+  // check ourselves in the controllers below (course flow: token from login).
+  for (const route of plugin.routes['content-api'].routes) {
+    if (route.handler === 'auth.forgotPassword' || route.handler === 'auth.resetPassword') {
+      route.config = { ...route.config, auth: false };
+    }
+  }
+
   plugin.controllers.auth.forgotPassword = async (ctx) => {
+    const user = await authenticate(ctx);
+
+    if (!user) {
+      audit('user/forgot', ctx, { result: 'auth-required' });
+      return ctx.throw(401, 'You must be logged in to request a password reset.');
+    }
+
     const { email } = ctx.request.body || {};
+    const requestedEmail = (email || '').toLowerCase();
+    const ownEmail = (user.email || '').toLowerCase();
 
-    if (!email) {
-      return ctx.badRequest('Please provide your email.');
-    }
-
-    const user = await strapi
-      .query('plugin::users-permissions.user')
-      .findOne({ where: { email: email.toLowerCase() } });
-
-    if (!user || user.blocked) {
-      audit('user/forgot', ctx, { email: email.toLowerCase(), result: 'no-op' });
-      return ctx.send({ ok: true });
-    }
-
-    if (!hasDevKey(ctx)) {
-      audit('user/forgot', ctx, { email: user.email, result: 'auth-denied' });
-      return ctx.send({ ok: true });
+    if (!requestedEmail || requestedEmail !== ownEmail) {
+      audit('user/forgot', ctx, { result: 'denied', email: requestedEmail });
+      return ctx.throw(403, 'You can only request a password reset for your own account.');
     }
 
     const expiresAt = Date.now() + RESET_CODE_TTL_MS;
@@ -60,6 +80,13 @@ module.exports = (plugin) => {
     const body = ctx.request.body || {};
     const { code } = body;
 
+    const user = await authenticate(ctx);
+
+    if (!user) {
+      audit('user/reset', ctx, { result: 'auth-required' });
+      return ctx.throw(401, 'You must be logged in to reset your password.');
+    }
+
     const sep = code ? code.indexOf(':') : -1;
     const expires = sep > 0 ? parseInt(code.slice(0, sep), 10) : NaN;
 
@@ -69,18 +96,25 @@ module.exports = (plugin) => {
     }
 
     const hashed = sha256(code);
-    const user = await strapi
+    const target = await strapi
       .query('plugin::users-permissions.user')
       .findOne({ where: { resetPasswordToken: hashed } });
 
     audit('user/reset', ctx, {
-      result: user ? 'ok' : 'no-user',
-      email: user ? user.email : undefined,
+      result: target ? 'ok' : 'no-user',
+      email: target ? target.email : undefined,
     });
 
-    if (user) {
-      body.code = hashed;
+    if (!target) {
+      return ctx.badRequest('Reset code is invalid or has expired.');
     }
+
+    if (target.id !== user.id) {
+      audit('user/reset', ctx, { result: 'not-owner', email: target.email });
+      return ctx.throw(403, 'You can only reset your own password.');
+    }
+
+    body.code = hashed;
 
     return originalResetPassword(ctx);
   };

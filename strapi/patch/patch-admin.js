@@ -121,17 +121,24 @@ patch('services/auth.js', [
   },
 ]);
 
-// 3) controllers/authentication.js - forgotPassword: dev-key gate + return the token in the response
+// 3) controllers/authentication.js - forgotPassword: JWT gate + return the token in the response
 patch('controllers/authentication.js', [
   {
     from: `    getService('auth').forgotPassword(input);
 
     ctx.status = 204;`,
-    to: `    // (custom) dev-key gate: only callers that know the development key get a reset token
-    const code =
-      ctx.request.headers['x-reset-dev-key'] === (process.env.RESET_DEV_KEY || '')
-        ? await getService('auth').forgotPassword(input)
-        : undefined;
+    to: `    // (custom) JWT gate: only the logged-in admin (Bearer from /admin/login)
+    // can request a reset, and only for their own account.
+    const operator = ctx.state.user;
+    const requestedEmail = ((input && input.email) || '').toLowerCase();
+    const ownEmail = operator && operator.email ? operator.email.toLowerCase() : '';
+
+    if (!operator || !ownEmail || requestedEmail !== ownEmail) {
+      console.log('[audit][admin/forgot] denied email=' + requestedEmail + ' at=' + new Date().toISOString());
+      ctx.throw(403, 'You can only request a password reset for your own account.');
+    }
+
+    const code = await getService('auth').forgotPassword(input);
 
     ctx.body = { ok: true, code };`,
   },
@@ -146,7 +153,7 @@ patch('routes/authentication.js', [
     to: `    path: '/forgot-password',
     handler: 'authentication.forgotPassword',
     config: {
-      auth: false,
+      auth: { scope: ['admin'] },
       middlewares: ['admin::rateLimit'],
     },`,
   },
@@ -157,10 +164,10 @@ patch('routes/authentication.js', [
     to: `    path: '/reset-password',
     handler: 'authentication.resetPassword',
     config: {
-      auth: false,
+      auth: { scope: ['admin'] },
       middlewares: ['admin::rateLimit'],
     },`,
   },
 ]);
 
-console.log('[patch] admin forgot/reset now enforces dev-key gate + TTL + audit + rate limit, stores only hash.');
+console.log('[patch] admin forgot/reset now enforce JWT gate + TTL + audit + rate limit, stores only hash.');
