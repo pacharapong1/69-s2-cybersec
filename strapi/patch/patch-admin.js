@@ -170,4 +170,44 @@ patch('routes/authentication.js', [
   },
 ]);
 
-console.log('[patch] admin forgot/reset now enforce JWT gate + TTL + audit + rate limit, stores only hash.');
+// 5) controllers/authentication.js - audit admin login success/failure
+patch('controllers/authentication.js', [
+  {
+    from: `        const sanitizedUser = getService('user').sanitizeUser(user);
+        strapi.eventHub.emit('admin.auth.success', { user: sanitizedUser, provider: 'local' });
+
+        return next();`,
+    to: `        const sanitizedUser = getService('user').sanitizeUser(user);
+        strapi.eventHub.emit('admin.auth.success', { user: sanitizedUser, provider: 'local' });
+        console.log('[audit][admin/login] email=' + (user.email || '') + ' at=' + new Date().toISOString() + ' ok');
+
+        return next();`,
+  },
+  {
+    from: `          strapi.eventHub.emit('admin.auth.error', {
+            error: new Error(info.message),
+            provider: 'local',
+          });
+          throw new ApplicationError(info.message);`,
+    to: `          strapi.eventHub.emit('admin.auth.error', {
+            error: new Error(info.message),
+            provider: 'local',
+          });
+          console.log('[audit][admin/login] failed email=' + (((ctx.request.body || {}).email || '')).toLowerCase() + ' at=' + new Date().toISOString());
+          throw new ApplicationError(info.message);`,
+  },
+]);
+
+// 6) controllers/authenticated-user.js - audit admin change own password
+patch('controllers/authenticated-user.js', [
+  {
+    from: `    const updatedUser = await userService.updateById(ctx.state.user.id, userInfo);`,
+    to: `    const updatedUser = await userService.updateById(ctx.state.user.id, userInfo);
+
+    if (userInfo.password) {
+      console.log('[audit][admin/change-own-password] email=' + ctx.state.user.email + ' at=' + new Date().toISOString() + ' ok');
+    }`,
+  },
+]);
+
+console.log('[patch] admin forgot/reset now enforce JWT gate + TTL + audit + rate limit, stores only hash.; login & change-own-password audited.');

@@ -13,6 +13,18 @@ function sha256(input) {
   return crypto.createHash('sha256').update(String(input)).digest('hex');
 }
 
+// Mirrors the admin-side password policy (@strapi/admin common-validators):
+// min 8 chars + at least one lowercase, uppercase and digit.
+function isStrongPassword(password) {
+  return (
+    typeof password === 'string' &&
+    password.length >= 8 &&
+    /[a-z]/.test(password) &&
+    /[A-Z]/.test(password) &&
+    /\d/.test(password)
+  );
+}
+
 async function authenticate(ctx) {
   try {
     const token = await strapi.plugin('users-permissions').service('jwt').getToken(ctx);
@@ -33,6 +45,9 @@ async function authenticate(ctx) {
 
 module.exports = (plugin) => {
   const originalResetPassword = plugin.controllers.auth.resetPassword;
+  const originalChangePassword = plugin.controllers.auth.changePassword;
+  const originalCallback = plugin.controllers.auth.callback;
+  const originalRegister = plugin.controllers.auth.register;
 
   // Strapi auto-injects `config.auth = { scope }` on content-api routes, and the
   // injected scope (plugin::users-permissions.auth.*) is not granted to the
@@ -43,6 +58,52 @@ module.exports = (plugin) => {
       route.config = { ...route.config, auth: false };
     }
   }
+
+  plugin.controllers.auth.callback = async (ctx) => {
+    const identifier =
+      (ctx.request.body && ctx.request.body.identifier) || ctx.params.provider || 'unknown';
+    try {
+      const result = await originalCallback(ctx);
+      audit('user/login', ctx, { identifier, result: 'ok' });
+      return result;
+    } catch (err) {
+      audit('user/login', ctx, { identifier, result: 'failed' });
+      throw err;
+    }
+  };
+
+  plugin.controllers.auth.register = async (ctx) => {
+    const password = (ctx.request.body || {}).password;
+
+    if (password !== undefined && !isStrongPassword(password)) {
+      audit('user/register', ctx, { result: 'weak-password' });
+      return ctx.badRequest(
+        'Password must be at least 8 characters and include lowercase, uppercase and a number.'
+      );
+    }
+
+    return originalRegister(ctx);
+  };
+
+  plugin.controllers.auth.changePassword = async (ctx) => {
+    const password = (ctx.request.body || {}).password;
+
+    if (password !== undefined && !isStrongPassword(password)) {
+      audit('user/change-password', ctx, { result: 'weak-password' });
+      return ctx.badRequest(
+        'Password must be at least 8 characters and include lowercase, uppercase and a number.'
+      );
+    }
+
+    try {
+      const result = await originalChangePassword(ctx);
+      audit('user/change-password', ctx, { result: 'ok' });
+      return result;
+    } catch (err) {
+      audit('user/change-password', ctx, { result: 'failed' });
+      throw err;
+    }
+  };
 
   plugin.controllers.auth.forgotPassword = async (ctx) => {
     const user = await authenticate(ctx);
@@ -85,6 +146,13 @@ module.exports = (plugin) => {
     if (!user) {
       audit('user/reset', ctx, { result: 'auth-required' });
       return ctx.throw(401, 'You must be logged in to reset your password.');
+    }
+
+    if (!isStrongPassword(body.password)) {
+      audit('user/reset', ctx, { result: 'weak-password' });
+      return ctx.badRequest(
+        'Password must be at least 8 characters and include lowercase, uppercase and a number.'
+      );
     }
 
     const sep = code ? code.indexOf(':') : -1;
