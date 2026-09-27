@@ -15,6 +15,7 @@ api.http
 # ===== Reset-token helper scripts (real private flow) =====
 forgot-token.sh
 reset-token.sh
+mailhog-code.js
 
 # ===== IDE / editor =====
 .vscode/
