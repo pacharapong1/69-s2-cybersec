@@ -30,3 +30,5 @@ desktop.ini
 *.log
 *.tmp
 *~
+
+mailhog-code.js
