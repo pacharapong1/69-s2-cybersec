@@ -1,13 +1,17 @@
 'use strict';
 
 const crypto = require('crypto');
+const audit = require('/opt/app/src/audit');
 
 const RESET_CODE_TTL_MS = 15 * 60 * 1000;
 
-function audit(action, ctx, extra = {}) {
-  const ip = (ctx && ctx.request && ctx.request.ip) || 'unknown';
-  console.log(`[audit][${action}] ip=${ip} at=${new Date().toISOString()} ${JSON.stringify(extra)}`);
-}
+// Account lockout: after MAX_LOGIN_FAILS consecutive failed logins for the same
+// identifier the account is locked for LOCKOUT_MS. Persisted in the plugin store
+// (DB) so the state is shared regardless of how the module is loaded.
+const LOGIN_MAX_FAILS = 5;
+const LOGIN_LOCKOUT_MS = 15 * 60 * 1000;
+const LOCKOUT_STORE_KEY = 'login_lockouts_store';
+const PASSWORD_CHANGED_STORE_KEY = 'password_changed_store';
 
 function sha256(input) {
   return crypto.createHash('sha256').update(String(input)).digest('hex');
@@ -25,13 +29,17 @@ function isStrongPassword(password) {
   );
 }
 
-// Account lockout: after MAX_LOGIN_FAILS consecutive failed logins for the same
-// identifier the account is locked for LOCKOUT_MS. Persisted in the plugin store
-// (DB) so the state is shared regardless of how the module is loaded.
-const LOGIN_MAX_FAILS = 5;
-const LOGIN_LOCKOUT_MS = 15 * 60 * 1000;
-const LOCKOUT_STORE_KEY = 'login_lockouts_store';
+function clientInfo(ctx) {
+  const req = (ctx && ctx.request) || {};
+  return {
+    ip: req.ip || 'unknown',
+    ua: (req && req.header && req.header['user-agent']) || 'unknown',
+  };
+}
 
+// ---------------------------------------------------------------------------
+// Login failure / lockout helpers (persisted in the plugin store)
+// ---------------------------------------------------------------------------
 async function getLoginFailures() {
   const store = strapi.store({ type: 'plugin', name: 'users-permissions' });
   const all = (await store.get({ key: LOCKOUT_STORE_KEY })) || {};
@@ -69,6 +77,31 @@ async function clearLoginFailures(identifier) {
   await store.set({ key: LOCKOUT_STORE_KEY, value: all });
 }
 
+// ---------------------------------------------------------------------------
+// Session revocation: every password change invalidates all tokens that were
+// issued before the change (compared on the JWT "iat" claim).
+// ---------------------------------------------------------------------------
+async function setPasswordChangedAt(userId, value) {
+  const store = strapi.store({ type: 'plugin', name: 'users-permissions' });
+  const all = (await store.get({ key: PASSWORD_CHANGED_STORE_KEY })) || {};
+  if (value == null) {
+    delete all[userId];
+  } else {
+    all[userId] = value;
+  }
+  await store.set({ key: PASSWORD_CHANGED_STORE_KEY, value: all });
+}
+
+async function getPasswordChangedAt(userId) {
+  const store = strapi.store({ type: 'plugin', name: 'users-permissions' });
+  const all = (await store.get({ key: PASSWORD_CHANGED_STORE_KEY })) || {};
+  return all[userId] || 0;
+}
+
+async function recordPasswordChange(userId) {
+  await setPasswordChangedAt(userId, Date.now());
+}
+
 async function authenticate(ctx) {
   try {
     const token = await strapi.plugin('users-permissions').service('jwt').getToken(ctx);
@@ -79,6 +112,10 @@ async function authenticate(ctx) {
       .query('plugin::users-permissions.user')
       .findOne({ where: { id: token.id } });
     if (!user || user.blocked) {
+      return null;
+    }
+    const changedAt = await getPasswordChangedAt(user.id);
+    if (changedAt && token.iat && Number(token.iat) < Math.floor(changedAt / 1000)) {
       return null;
     }
     return user;
@@ -119,7 +156,7 @@ module.exports = (plugin) => {
 
     if (provider === 'local') {
       if (await isAccountLocked(identifier)) {
-        audit('user/login', ctx, { identifier, result: 'locked' });
+        audit('user/login', clientInfo(ctx), { identifier, result: 'locked' });
         return ctx.throw(423, 'Too many login attempts. Please try again later.');
       }
     }
@@ -129,17 +166,17 @@ module.exports = (plugin) => {
       if (provider === 'local') {
         await clearLoginFailures(identifier);
       }
-      audit('user/login', ctx, { identifier, result: 'ok' });
+      audit('user/login', clientInfo(ctx), { identifier, result: 'ok' });
       return result;
     } catch (err) {
       if (provider === 'local') {
         const lockedUntil = await recordLoginFailure(identifier);
         if (lockedUntil) {
-          audit('user/login', ctx, { identifier, result: 'lockout' });
+          audit('user/login', clientInfo(ctx), { identifier, result: 'lockout' });
         }
-        audit('user/login', ctx, { identifier, result: 'failed' });
+        audit('user/login', clientInfo(ctx), { identifier, result: 'failed' });
       } else {
-        audit('user/login', ctx, { identifier, result: 'failed' });
+        audit('user/login', clientInfo(ctx), { identifier, result: 'failed' });
       }
       throw err;
     }
@@ -155,7 +192,7 @@ module.exports = (plugin) => {
       if (err.name === 'ValidationError') {
         throw err;
       }
-      audit('user/send-email-confirmation', ctx, { email, result: 'uniform-response' });
+      audit('user/send-email-confirmation', clientInfo(ctx), { email, result: 'uniform-response' });
       return ctx.send({ email: (email || '').toLowerCase(), sent: true });
     }
     return undefined;
@@ -165,7 +202,7 @@ module.exports = (plugin) => {
     const password = (ctx.request.body || {}).password;
 
     if (password !== undefined && !isStrongPassword(password)) {
-      audit('user/register', ctx, { result: 'weak-password' });
+      audit('user/register', clientInfo(ctx), { result: 'weak-password' });
       return ctx.badRequest(
         'Password must be at least 8 characters and include lowercase, uppercase and a number.'
       );
@@ -175,21 +212,36 @@ module.exports = (plugin) => {
   };
 
   plugin.controllers.auth.changePassword = async (ctx) => {
-    const password = (ctx.request.body || {}).password;
+    const body = ctx.request.body || {};
+    const password = body.password;
 
     if (password !== undefined && !isStrongPassword(password)) {
-      audit('user/change-password', ctx, { result: 'weak-password' });
+      audit('user/change-password', clientInfo(ctx), { result: 'weak-password' });
       return ctx.badRequest(
         'Password must be at least 8 characters and include lowercase, uppercase and a number.'
       );
     }
 
+    let previousChangedAt = 0;
+    if (ctx.state.user) {
+      previousChangedAt = await getPasswordChangedAt(ctx.state.user.id);
+    }
+
     try {
+      // Record the change BEFORE issuing the replacement token so the new JWT
+      // (iat = now) stays valid while every older token is revoked. On failure
+      // the recorded change is rolled back so no session is revoked.
+      if (ctx.state.user) {
+        await recordPasswordChange(ctx.state.user.id);
+      }
       const result = await originalChangePassword(ctx);
-      audit('user/change-password', ctx, { result: 'ok' });
+      audit('user/change-password', clientInfo(ctx), { result: 'ok' });
       return result;
     } catch (err) {
-      audit('user/change-password', ctx, { result: 'failed' });
+      if (ctx.state.user) {
+        await setPasswordChangedAt(ctx.state.user.id, previousChangedAt || null);
+      }
+      audit('user/change-password', clientInfo(ctx), { result: 'failed' });
       throw err;
     }
   };
@@ -198,7 +250,7 @@ module.exports = (plugin) => {
     const user = await authenticate(ctx);
 
     if (!user) {
-      audit('user/forgot', ctx, { result: 'auth-required' });
+      audit('user/forgot', clientInfo(ctx), { result: 'auth-required' });
       return ctx.throw(401, 'You must be logged in to request a password reset.');
     }
 
@@ -207,7 +259,7 @@ module.exports = (plugin) => {
     const ownEmail = (user.email || '').toLowerCase();
 
     if (!requestedEmail || requestedEmail !== ownEmail) {
-      audit('user/forgot', ctx, { result: 'denied', email: requestedEmail });
+      audit('user/forgot', clientInfo(ctx), { email: requestedEmail, result: 'denied' });
       return ctx.throw(403, 'You can only request a password reset for your own account.');
     }
 
@@ -221,24 +273,53 @@ module.exports = (plugin) => {
         data: { resetPasswordToken: sha256(code) },
       });
 
-    audit('user/forgot', ctx, { email: user.email, result: 'token-issued' });
+    // The reset code is delivered out-of-band (email) — it must never appear in
+    // the HTTP response.
+    try {
+      const from =
+        strapi.config.get('plugin.email.settings.defaultFrom') || 'no-reply@localhost';
+      const text = [
+        'Password reset request',
+        '',
+        `Your verification code is:`,
+        '',
+        code,
+        '',
+        'It will expire in 15 minutes. Use it with POST /api/auth/reset-password.',
+      ].join('\n');
 
-    ctx.send({ ok: true, code });
+      await strapi.plugin('email').service('email').send({
+        from,
+        to: user.email,
+        replyTo: from,
+        subject: 'Password reset request',
+        text,
+        html: text.replace(/\n/g, '<br/>'),
+      });
+
+      audit('user/forgot', clientInfo(ctx), { email: user.email, result: 'token-emailed' });
+    } catch (err) {
+      audit('user/forgot', clientInfo(ctx), { email: user.email, result: 'email-failed' });
+      return ctx.throw(500, 'Could not send the reset email. Please try again later.');
+    }
+
+    ctx.send({ ok: true });
   };
 
   plugin.controllers.auth.resetPassword = async (ctx) => {
     const body = ctx.request.body || {};
-    const { code } = body;
+    // tolerate URL-encoded codes copied from the reset email (link: %3A = ":")
+    let code = typeof body.code === 'string' ? body.code.replace(/%3A/gi, ':').trim() : body.code;
 
     const user = await authenticate(ctx);
 
     if (!user) {
-      audit('user/reset', ctx, { result: 'auth-required' });
+      audit('user/reset', clientInfo(ctx), { result: 'auth-required' });
       return ctx.throw(401, 'You must be logged in to reset your password.');
     }
 
     if (!isStrongPassword(body.password)) {
-      audit('user/reset', ctx, { result: 'weak-password' });
+      audit('user/reset', clientInfo(ctx), { result: 'weak-password' });
       return ctx.badRequest(
         'Password must be at least 8 characters and include lowercase, uppercase and a number.'
       );
@@ -248,7 +329,7 @@ module.exports = (plugin) => {
     const expires = sep > 0 ? parseInt(code.slice(0, sep), 10) : NaN;
 
     if (!(expires && expires > Date.now())) {
-      audit('user/reset', ctx, { result: 'invalid-or-expired' });
+      audit('user/reset', clientInfo(ctx), { result: 'invalid-or-expired' });
       return ctx.badRequest('Reset code is invalid or has expired.');
     }
 
@@ -257,7 +338,7 @@ module.exports = (plugin) => {
       .query('plugin::users-permissions.user')
       .findOne({ where: { resetPasswordToken: hashed } });
 
-    audit('user/reset', ctx, {
+    audit('user/reset', clientInfo(ctx), {
       result: target ? 'ok' : 'no-user',
       email: target ? target.email : undefined,
     });
@@ -267,13 +348,27 @@ module.exports = (plugin) => {
     }
 
     if (target.id !== user.id) {
-      audit('user/reset', ctx, { result: 'not-owner', email: target.email });
+      audit('user/reset', clientInfo(ctx), { result: 'not-owner', email: target.email });
       return ctx.throw(403, 'You can only reset your own password.');
     }
 
     body.code = hashed;
 
-    return originalResetPassword(ctx);
+    // Record the change BEFORE the original controller replaces the password and
+    // issues the new JWT, so the freshly issued token (iat = now) stays valid
+    // while every previously issued token is revoked. On failure the recorded
+    // change is rolled back so no session is revoked.
+    const previousChangedAt = await getPasswordChangedAt(user.id);
+    await recordPasswordChange(user.id);
+
+    try {
+      const result = await originalResetPassword(ctx);
+      return result;
+    } catch (err) {
+      await setPasswordChangedAt(user.id, previousChangedAt || null);
+      audit('user/reset', clientInfo(ctx), { result: 'failed' });
+      throw err;
+    }
   };
 
   return plugin;

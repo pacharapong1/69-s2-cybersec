@@ -33,6 +33,14 @@
 @student_id = {{$dotenv STUDENT_ID}}
 @subject_id = {{$dotenv SUBJECT_ID}}
 @teacher_id = {{$dotenv TEACHER_ID}}
+@student_name = {{$dotenv STUDENT_NAME}}
+@student_mobile = {{$dotenv STUDENT_MOBILE}}
+@student_card_id = {{$dotenv STUDENT_CARD_ID}}
+@student_name_updated = {{$dotenv STUDENT_NAME_UPDATED}}
+@subject_name = {{$dotenv SUBJECT_NAME}}
+@subject_name_updated = {{$dotenv SUBJECT_NAME_UPDATED}}
+@teacher_name = {{$dotenv TEACHER_NAME}}
+@teacher_name_updated = {{$dotenv TEACHER_NAME_UPDATED}}
 
 ## 1. Admin
 
@@ -79,7 +87,7 @@ Authorization: Bearer {{adminLogin.response.body.$.data.token}}
 }
 
 ### 1.3.2 หลังเปลี่ยนรหัสผ่าน JWT เก่าถูก revoke — ล็อคอินใหม่แล้วเอา token มาใส่ใน 1.4
-### @name adminLoginAgain
+# @name adminLoginAgain
 POST {{baseUrl}}/admin/login
 Content-Type: application/json
 
@@ -137,7 +145,7 @@ Authorization: Bearer {{userLogin.response.body.$.jwt}}
 }
 
 ### 2.3.2 หลังเปลี่ยนรหัสผ่าน JWT เก่าถูก revoke — ล็อคอินใหม่แล้วเอา token มาใส่ใน 2.4
-### @name userLoginAgain
+# @name userLoginAgain
 POST {{baseUrl}}/api/auth/local
 Content-Type: application/json
 
@@ -160,7 +168,12 @@ Authorization: Bearer {{userLoginAgain.response.body.$.jwt}}
 #    ถ้าไม่ส่ง token จะได้ 403 เพราะ Role "Public" ไม่มีสิทธิ์กับ content type นี้
 #
 # 2) field ที่กำหนด unique (mobile, cardId ของ student / name ของ subject)
-#    ถ้าสร้างซ้ำจะได้ 400 ให้เปลี่ยนค่าใน body แล้วยิงใหม่
+#    ถ้าสร้างซ้ำจะได้ 400 ให้เปลี่ยนค่าใน .env (STUDENT_MOBILE / STUDENT_CARD_ID / SUBJECT_NAME) แล้วยิงใหม่
+#
+# 2.1) นอกจาก unique แล้ว ยังมีข้อบังคับความยาวจาก schema ด้วย (ไม่ตรงจะได้ 400 เช่นกัน)
+#     - student.mobile = 10 ตัวพอดี  (เช่น 0801234567)
+#     - student.cardId = 13 ตัวพอดี (เช่น 1234567890123)
+#     - subject.name  / teacher.name ไม่จำกัดความยาว
 #
 # 3) student มี lifecycle ที่แปลง mobile เป็น md5 ก่อนบันทึก
 #    -> ค่าที่กลับมาใน response คือ hash ไม่ใช่เบอร์จริง
@@ -183,9 +196,9 @@ Authorization: Bearer {{user_jwt}}
 
 {
     "data": {
-        "name": "สมชาย ใจดี",
-        "mobile": "0801234567",
-        "cardId": "1234567890123"
+        "name": "{{student_name}}",
+        "mobile": "{{student_mobile}}",
+        "cardId": "{{student_card_id}}"
     }
 }
 
@@ -206,7 +219,7 @@ Authorization: Bearer {{user_jwt}}
 
 {
     "data": {
-        "name": "สมชาย ใจดี แก้ชื่อแล้ว"
+        "name": "{{student_name_updated}}"
     }
 }
 
@@ -219,7 +232,7 @@ Authorization: Bearer {{user_jwt}}
 
 {
     "data": {
-        "name": "Cyber Security"
+        "name": "{{subject_name}}"
     }
 }
 
@@ -239,7 +252,7 @@ Authorization: Bearer {{user_jwt}}
 
 {
     "data": {
-        "name": "Cyber Security (Advanced)"
+        "name": "{{subject_name_updated}}"
     }
 }
 
@@ -252,7 +265,7 @@ Authorization: Bearer {{user_jwt}}
 
 {
     "data": {
-        "name": "อาจารย์ ทดสอบ"
+        "name": "{{teacher_name}}"
     }
 }
 
@@ -272,6 +285,6 @@ Authorization: Bearer {{user_jwt}}
 
 {
     "data": {
-        "name": "อาจารย์ ทดสอบ แก้ชื่อแล้ว"
+        "name": "{{teacher_name_updated}}"
     }
 }

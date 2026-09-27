@@ -44,8 +44,22 @@ services:
       ADMIN_JWT_SECRET: ${ADMIN_JWT_SECRET}
       API_TOKEN_SALT: ${API_TOKEN_SALT}
       TRANSFER_TOKEN_SALT: ${TRANSFER_TOKEN_SALT}
+      EMAIL_PROVIDER_DEV_HOST: mail
+      EMAIL_PROVIDER_DEV_PORT: 1025
+      EMAIL_DEFAULT_FROM: ${EMAIL_DEFAULT_FROM}
+      AUDIT_LOG_PATH: /audit/audit.log
+    volumes:
+      - ./data-audit:/audit
     depends_on:
       - db
+      - mail
+
+  mail:
+    image: mailhog/mailhog:latest
+    container_name: 69-s2-mail
+    ports:
+      - ${MAILHOG_SMTP_PORT}:1025
+      - ${MAILHOG_WEB_PORT}:8025
 
 volumes:
   data-postgres:

@@ -25,7 +25,50 @@ function patch(file, pairs) {
   console.log(`[patch] ok: ${file}`);
 }
 
-// 1) services/auth.js - forgotPassword: TTL + store hash only + audit, still return the code (course flow)
+// ------------------------------------------------------------------
+// 0) Shared: inject constant "audit" (durable JSONL logger) into the
+//    files that will be patched below.
+// ------------------------------------------------------------------
+patch('services/auth.js', [
+  {
+    from: `const { getService } = require('../utils');`,
+    to: `const { getService } = require('../utils');
+const audit = require('/opt/app/src/audit');`,
+  },
+]);
+patch('controllers/authentication.js', [
+  {
+    from: `const { getService } = require('../utils');`,
+    to: `const { getService } = require('../utils');
+const audit = require('/opt/app/src/audit');`,
+  },
+]);
+patch('controllers/authenticated-user.js', [
+  {
+    from: `const { getService } = require('../utils');`,
+    to: `const { getService } = require('../utils');
+const audit = require('/opt/app/src/audit');`,
+  },
+]);
+patch('strategies/admin.js', [
+  {
+    from: `const { getService } = require('../utils');`,
+    to: `const { getService } = require('../utils');
+const audit = require('/opt/app/src/audit');`,
+  },
+]);
+patch('services/user.js', [
+  {
+    from: `const { getService } = require('../utils');`,
+    to: `const { getService } = require('../utils');
+const audit = require('/opt/app/src/audit');`,
+  },
+]);
+
+// ------------------------------------------------------------------
+// 1) services/auth.js - forgotPassword: TTL + store hash only + deliver
+//    the code out-of-band by email (never in the HTTP response).
+// ------------------------------------------------------------------
 patch('services/auth.js', [
   {
     from: `  const resetPasswordToken = getService('token').createToken();
@@ -65,14 +108,38 @@ patch('services/auth.js', [
     resetPasswordToken: crypto.createHash('sha256').update(code).digest('hex'),
   });
 
-  // (custom) TTL + audit: return the reset token to the client (course test flow), no email
-  console.log(\`[audit][admin/forgot] email=\${email} at=\${new Date().toISOString()} ok\`);
-  return code;
+  // (custom) TTL + deliver the reset code out-of-band by email (no code in the response)
+  const url = \`\${getAbsoluteAdminUrl(
+    strapi.config
+  )}/auth/reset-password?code=\${encodeURIComponent(code)}\`;
+  await strapi
+    .plugin('email')
+    .service('email')
+    .sendTemplatedEmail(
+      {
+        to: user.email,
+        from: strapi.config.get('admin.forgotPassword.from'),
+        replyTo: strapi.config.get('admin.forgotPassword.replyTo'),
+      },
+      strapi.config.get('admin.forgotPassword.emailTemplate'),
+      {
+        url,
+        user: _.pick(user, ['email', 'firstname', 'lastname', 'username']),
+      }
+    )
+    .catch((err) => {
+      // log error server side but do not disclose it to the user to avoid leaking informations
+      strapi.log.error(err);
+    });
+
+  audit('admin/forgot', { email: user.email, result: 'token-issued' });
 };`,
   },
 ]);
 
+// ------------------------------------------------------------------
 // 2) services/auth.js - resetPassword: validate TTL + lookup by hash + audit then reset
+// ------------------------------------------------------------------
 patch('services/auth.js', [
   {
     from: `const resetPassword = async ({ resetPasswordToken, password } = {}) => {
@@ -90,11 +157,15 @@ patch('services/auth.js', [
   });
 };`,
     to: `const resetPassword = async ({ resetPasswordToken, password } = {}) => {
+  // (custom) tolerate URL-encoded codes copied from the reset email (link: %3A = ":")
+  if (resetPasswordToken && typeof resetPasswordToken === 'string') {
+    resetPasswordToken = resetPasswordToken.replace(/%3A/gi, ':').trim();
+  }
   // (custom) TTL check
   const sepIdx = resetPasswordToken && resetPasswordToken.indexOf(':');
   const expires = sepIdx > 0 ? parseInt(resetPasswordToken.slice(0, sepIdx), 10) : NaN;
   if (!(expires && expires > Date.now())) {
-    console.log('[audit][admin/reset] invalid or expired token at=' + new Date().toISOString());
+    audit('admin/reset', { result: 'invalid-or-expired' });
     throw new ApplicationError();
   }
 
@@ -106,7 +177,7 @@ patch('services/auth.js', [
     .findOne({ where: { resetPasswordToken: hashedToken, isActive: true } });
 
   if (!matchingUser) {
-    console.log('[audit][admin/reset] no user for token at=' + new Date().toISOString());
+    audit('admin/reset', { result: 'no-user' });
     throw new ApplicationError();
   }
 
@@ -115,13 +186,16 @@ patch('services/auth.js', [
     resetPasswordToken: null,
   });
 
-  console.log('[audit][admin/reset] ok email=' + matchingUser.email + ' at=' + new Date().toISOString());
+  audit('admin/reset', { result: 'ok', email: matchingUser.email });
   return updated;
 };`,
   },
 ]);
 
-// 3) controllers/authentication.js - forgotPassword: JWT gate + return the token in the response
+// ------------------------------------------------------------------
+// 3) controllers/authentication.js - forgotPassword: JWT gate + own-email
+//    check, then out-of-band email (no code in the response).
+// ------------------------------------------------------------------
 patch('controllers/authentication.js', [
   {
     from: `    getService('auth').forgotPassword(input);
@@ -134,17 +208,20 @@ patch('controllers/authentication.js', [
     const ownEmail = operator && operator.email ? operator.email.toLowerCase() : '';
 
     if (!operator || !ownEmail || requestedEmail !== ownEmail) {
-      console.log('[audit][admin/forgot] denied email=' + requestedEmail + ' at=' + new Date().toISOString());
+      audit('admin/forgot', { email: requestedEmail, ip: ctx.request.ip || 'unknown', result: 'denied' });
       ctx.throw(403, 'You can only request a password reset for your own account.');
     }
 
-    const code = await getService('auth').forgotPassword(input);
+    await getService('auth').forgotPassword(input);
 
-    ctx.body = { ok: true, code };`,
+    audit('admin/forgot', { email: requestedEmail, ip: ctx.request.ip || 'unknown', result: 'ok' });
+    ctx.status = 204;`,
   },
 ]);
 
+// ------------------------------------------------------------------
 // 4) routes/authentication.js - apply admin::rateLimit to forgot/reset password
+// ------------------------------------------------------------------
 patch('routes/authentication.js', [
   {
     from: `    path: '/forgot-password',
@@ -164,13 +241,15 @@ patch('routes/authentication.js', [
     to: `    path: '/reset-password',
     handler: 'authentication.resetPassword',
     config: {
-      auth: { scope: ['admin'] },
+      auth: false,
       middlewares: ['admin::rateLimit'],
     },`,
   },
 ]);
 
-// 5) controllers/authentication.js - audit admin login success/failure
+// ------------------------------------------------------------------
+// 5) controllers/authentication.js - audit admin login success/failure (with IP)
+// ------------------------------------------------------------------
 patch('controllers/authentication.js', [
   {
     from: `        const sanitizedUser = getService('user').sanitizeUser(user);
@@ -179,7 +258,7 @@ patch('controllers/authentication.js', [
         return next();`,
     to: `        const sanitizedUser = getService('user').sanitizeUser(user);
         strapi.eventHub.emit('admin.auth.success', { user: sanitizedUser, provider: 'local' });
-        console.log('[audit][admin/login] email=' + (user.email || '') + ' at=' + new Date().toISOString() + ' ok');
+        audit('admin/login', { email: (user.email || '').toLowerCase(), ip: ctx.request.ip || 'unknown', result: 'ok' });
 
         return next();`,
   },
@@ -193,19 +272,29 @@ patch('controllers/authentication.js', [
             error: new Error(info.message),
             provider: 'local',
           });
-          console.log('[audit][admin/login] failed email=' + (((ctx.request.body || {}).email || '')).toLowerCase() + ' at=' + new Date().toISOString());
+          audit('admin/login', {
+            email: ((ctx.request.body || {}).email || '').toLowerCase(),
+            ip: ctx.request.ip || 'unknown',
+            result: 'failed',
+          });
           throw new ApplicationError(info.message);`,
   },
 ]);
 
-// 6) controllers/authenticated-user.js - audit admin change own password
+// ------------------------------------------------------------------
+// 6) controllers/authenticated-user.js - audit admin change own password + same-password check
+// ------------------------------------------------------------------
 patch('controllers/authenticated-user.js', [
   {
     from: `    const updatedUser = await userService.updateById(ctx.state.user.id, userInfo);`,
     to: `    const updatedUser = await userService.updateById(ctx.state.user.id, userInfo);
 
     if (userInfo.password) {
-      console.log('[audit][admin/change-own-password] email=' + ctx.state.user.email + ' at=' + new Date().toISOString() + ' ok');
+      audit('admin/change-own-password', {
+        email: ctx.state.user.email,
+        ip: ctx.request.ip || 'unknown',
+        result: 'ok',
+      });
     }`,
   },
   {
@@ -220,7 +309,9 @@ patch('controllers/authenticated-user.js', [
   },
 ]);
 
-// 7) services/auth.js - account lockout on repeated failed logins
+// ------------------------------------------------------------------
+// 7) services/auth.js - account lockout on repeated failed logins (persisted in the DB)
+// ------------------------------------------------------------------
 patch('services/auth.js', [
   {
     from: `const checkCredentials = async ({ email, password }) => {
@@ -242,20 +333,27 @@ patch('services/auth.js', [
 
   return [null, user];
 };`,
-    to: `const loginFailures = new Map();
-const LOGIN_MAX_FAILS = 5;
+    to: `const LOGIN_MAX_FAILS = 5;
 const LOGIN_LOCKOUT_MS = 15 * 60 * 1000;
+const LOCKOUT_STORE_KEY = 'admin_login_lockouts';
+
+const getAdminLockout = async (lockKey) => {
+  const store = strapi.store({ type: 'plugin', name: 'users-permissions' });
+  const all = (await store.get({ key: LOCKOUT_STORE_KEY })) || {};
+  return { store, all, rec: all[lockKey] || null };
+};
 
 const checkCredentials = async ({ email, password }) => {
   const lockKey = String(email || '').toLowerCase();
 
-  const rec = loginFailures.get(lockKey);
+  const { store, all, rec } = await getAdminLockout(lockKey);
+
   if (rec && rec.until > Date.now()) {
-    console.log('[audit][admin/login] locked email=' + email + ' at=' + new Date().toISOString());
+    audit('admin/login', { email, result: 'locked' });
     return [null, false, { message: 'Too many login attempts. Please try again later.' }];
   }
   if (rec && rec.until <= Date.now()) {
-    loginFailures.delete(lockKey);
+    delete all[lockKey];
   }
 
   const user = await strapi.query('admin::user').findOne({ where: { email } });
@@ -269,10 +367,12 @@ const checkCredentials = async ({ email, password }) => {
   if (!isValid) {
     const count = (rec ? rec.count : 0) + 1;
     if (count >= LOGIN_MAX_FAILS) {
-      loginFailures.set(lockKey, { count: 0, until: Date.now() + LOGIN_LOCKOUT_MS });
-      console.log('[audit][admin/login] lockout email=' + email + ' at=' + new Date().toISOString());
+      all[lockKey] = { count: 0, until: Date.now() + LOGIN_LOCKOUT_MS };
+      await store.set({ key: LOCKOUT_STORE_KEY, value: all });
+      audit('admin/login', { email, result: 'lockout' });
     } else {
-      loginFailures.set(lockKey, { count, until: 0 });
+      all[lockKey] = { count, until: 0 };
+      await store.set({ key: LOCKOUT_STORE_KEY, value: all });
     }
     return [null, false, { message: 'Invalid credentials' }];
   }
@@ -281,14 +381,95 @@ const checkCredentials = async ({ email, password }) => {
     return [null, false, { message: 'User not active' }];
   }
 
-  loginFailures.delete(lockKey);
+  delete all[lockKey];
+  await store.set({ key: LOCKOUT_STORE_KEY, value: all });
 
   return [null, user];
 };`,
   },
 ]);
 
-// 8) routes/authentication.js - rate limit admin /renew-token
+// ------------------------------------------------------------------
+// 8) services/user.js - record a password-changed timestamp whenever a new
+//    password is stored so previously issued admin JWTs are revoked.
+// ------------------------------------------------------------------
+patch('services/user.js', [
+  {
+    from: `  // hash password if a new one is sent
+  if (_.has(attributes, 'password')) {
+    const hashedPassword = await getService('auth').hashPassword(attributes.password);
+
+    const updatedUser = await strapi.query('admin::user').update({
+      where: { id },
+      data: {
+        ...attributes,
+        password: hashedPassword,
+      },
+      populate: ['roles'],
+    });
+
+    strapi.eventHub.emit('user.update', { user: sanitizeUser(updatedUser) });
+
+    return updatedUser;
+  }`,
+    to: `  // hash password if a new one is sent
+  if (_.has(attributes, 'password')) {
+    const hashedPassword = await getService('auth').hashPassword(attributes.password);
+
+    const updatedUser = await strapi.query('admin::user').update({
+      where: { id },
+      data: {
+        ...attributes,
+        password: hashedPassword,
+      },
+      populate: ['roles'],
+    });
+
+    strapi.eventHub.emit('user.update', { user: sanitizeUser(updatedUser) });
+
+    // (custom) invalidate every previously issued JWT for this user
+    const store = strapi.store({ type: 'plugin', name: 'users-permissions' });
+    const pwdAll = (await store.get({ key: 'admin_password_changed' })) || {};
+    pwdAll[id] = Date.now();
+    await store.set({ key: 'admin_password_changed', value: pwdAll });
+
+    audit('admin/password-changed', { userId: id, result: 'ok' });
+
+    return updatedUser;
+  }`,
+  },
+]);
+
+// ------------------------------------------------------------------
+// 9) strategies/admin.js - reject admin JWTs issued before the last password change
+// ------------------------------------------------------------------
+patch('strategies/admin.js', [
+  {
+    from: `  if (!user || !(user.isActive === true)) {
+    return { authenticated: false };
+  }
+
+  const userAbility = await getService('permission').engine.generateUserAbility(user);`,
+    to: `  if (!user || !(user.isActive === true)) {
+    return { authenticated: false };
+  }
+
+  // (custom) session revocation: tokens issued before the last password change
+  // are no longer accepted
+  const store = strapi.store({ type: 'plugin', name: 'users-permissions' });
+  const pwdAll = (await store.get({ key: 'admin_password_changed' })) || {};
+  const changedAt = pwdAll[payload.id] || 0;
+  if (payload.iat && Number(payload.iat) < Math.floor(changedAt / 1000)) {
+    return { authenticated: false };
+  }
+
+  const userAbility = await getService('permission').engine.generateUserAbility(user);`,
+  },
+]);
+
+// ------------------------------------------------------------------
+// 10) routes/authentication.js - rate limit admin /renew-token
+// ------------------------------------------------------------------
 patch('routes/authentication.js', [
   {
     from: `    path: '/renew-token',
@@ -303,4 +484,4 @@ patch('routes/authentication.js', [
   },
 ]);
 
-console.log('[patch] admin lockout + renew-token rate limit + same-password check added.');
+console.log('[patch] admin: email-based reset, durable lockout, session revocation, audit added.');
